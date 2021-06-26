@@ -5,11 +5,58 @@
 3. [Comparison of SQLite Table Designs](#comparison-of-sqlite-table-designs)
 
 
-# Comparison with Archivemount
+# Comparison with Archivemount (June 2021)
+
+Since the last comparison benchmark, the zstd compression backend was added and `indexed_bzip2` was parallelized using threads.
+
+To reduce the clutter, in the plot, the benchmarks with a file size of `64B` have been removed because they behave virtually the same as the `0B` per file case because `64B` of file contents are miniscule compoared to 20x512B blocks per record per default.
+
+![Benchmark comparison between ratarmount and archivemount](plots/archivemount-comparison.png)
+
+## Conclusions
+
+Only new observations are mentioned here. The other ones can be read in the older benchmark evaluation below.
+
+The zstd backend, unfortunately comes with the largest memory overhead yet, which seems to be linearly increasing with the file size. The very last measurement indicates that the memory footprint tops out at roughly 50GiB. I do have 62.8 GiB of RAM and I used the PC during the benchmarks, so it might just be that zstd decoder noticed that it becomes close to running out of memory and therefore tries to work with less? Maybe that measurement is an outlier. An out-of-memory kill shouldn't have happened because, then, the other benchmarks wouldn't have run for this configuration.
+
+The mount time for `0B` files inside the TAR is mainly bounded by I/O for reading the TAR and by the overhead of inserting those file information into the SQLite database.
+That's why for, both, ratarmount and archivemount, the mount time for `0B` files does not vary much between the different compression backends.
+
+Both, ratarmount and archivemount have a sudden slowdown for larger files for uncompressed TAR files.
+As that slowdown is the same for both and because this only happens for the uncompressedd files, which are roughly 20% larger than the compressed ones, I suspect that the SLC-cache for my TLC Crucial MX500 1TB SSD has been depleted.
+In the benchmark from over a year ago, I didn't observe such a thing.
+Maybe because the SSD had more free space back then.
+
+Mount time with zstd is roughly the same between archivemount and ratarmount and in general the fastest of all compared.
+
+Because of the parallelized `indexed_bzip2` backend, the mount time for .tar.bz2 files could be reduced by roughly factor 12 on my Ryzen 3900X with 12 physical and 24 logical cores. 
+Because the parallelization is over blocks, the memory usage for the bz2 backend went up because at least as many bz2 blocks as there is parallelization (24 for these tests) must be hold in memory after prefetching.
+To improve the speed, this is in general even more than that.
+The memory usage is bounded by the maximum block cache size and maximum prefetch size but it might vary because of compression ratios of the blocks itself!
+In the benchmarks, it seems to top out at roughly 800 MiB.
+This shows how important more RAM is to make good use of processors with a lot of cores!
+
+In my biased opinion, bzip2 compressed TAR files are now the best contender after uncompressed TAR files when using ratarmount.
+However, the parallelization introduced further complexities, which I tried to keep in check by adding more sanitizers and tests to the CI, but as of now, I advise caution when using ratarmount with bz2 files!
+Because of that, the default for ratarmount is to not use the parallelized version.
+It has to be explicitly enabled with `-P 0`.
+
+
+# Parallel Bzip2 Decoder Speedup
+
+![Speedup ratarmount -P 24 over -P 1 for bz2 backend](plots/parallel-bz2-ratarmount-comparison.png)
+
+When using all 24 logical cores for the parallel bz2 decoder in `indexed_bzip2`, the speedup tops out at roughly 12, which seems to coincide with my physical cores. 
+However, with only `-P 12`, the speedup will be much smaller than 12! The latter is not shown here but was observed manually.
+
+In general, the parallelization is quite trivial over the bz2 blocks but there might be reducing the parallel efficiency like I/O access becoming more random instead of sequential or caches being thrashed.
+
+
+# Comparison with Archivemount (December 2019)
 
 Here is a benchmark of memory footprint and required time for first mounting, as well as access times for a simple `cat <file-in-tar>` command and a simple `find` command.
 
-![Benchmark comparison between ratarmount and archivemount](plots/archivemount-comparison.png)
+![Benchmark comparison between ratarmount and archivemount](plots/archivemount-comparison-2019-12-17.png)
 
 Folders containing each 1k files were created and the number of folders is varied.
 
