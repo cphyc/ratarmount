@@ -17,23 +17,30 @@ To reduce the clutter, in the plot, the benchmarks with a file size of `64B` hav
 
 Only new observations are mentioned here. The other ones can be read in the older benchmark evaluation below.
 
-The zstd backend, unfortunately comes with the largest memory overhead yet, which seems to be linearly increasing with the file size. The very last measurement indicates that the memory footprint tops out at roughly 50GiB. I do have 62.8 GiB of RAM and I used the PC during the benchmarks, so it might just be that zstd decoder noticed that it becomes close to running out of memory and therefore tries to work with less? Maybe that measurement is an outlier. An out-of-memory kill shouldn't have happened because, then, the other benchmarks wouldn't have run for this configuration.
+The zstd backend, unfortunately comes with the largest memory overhead yet.
+It seems to be linearly increasing with the file size.
+The last measurements indicate that the memory footprint tops out at roughly 50GiB.
+I do have 62.8 GiB of RAM and I used the PC during the benchmarks, so it might just be that zstd decoder noticed that it becomes close to running out of memory and therefore tries to work with the memory it has?
+But an out-of-memory kill shouldn't have happened because, then, the other benchmarks wouldn't have run for this configuration.
 
 The mount time for `0B` files inside the TAR is mainly bounded by I/O for reading the TAR and by the overhead of inserting those file information into the SQLite database.
 That's why for, both, ratarmount and archivemount, the mount time for `0B` files does not vary much between the different compression backends.
 
-Both, ratarmount and archivemount have a sudden slowdown for larger files for uncompressed TAR files.
-As that slowdown is the same for both and because this only happens for the uncompressedd files, which are roughly 20% larger than the compressed ones, I suspect that the SLC-cache for my TLC Crucial MX500 1TB SSD has been depleted.
+Archivemount, and in other benchmarks also ratarmount, has a sudden slowdown for larger files for uncompressed TAR files.
+And it even becomes slightly slower than the zstd compressed TAR.
+This might be because the compressed archives are all roughly 20% smaller.
+Therefore, I suspect I/O issues of some kind.
+E.g., my TLC Crucial MX500 1TB SSD has an SLC-cache whose capacity might be exceeded
 In the benchmark from over a year ago, I didn't observe such a thing.
 Maybe because the SSD had more free space back then.
 
 Mount time with zstd is roughly the same between archivemount and ratarmount and in general the fastest of all compared.
 
-Because of the parallelized `indexed_bzip2` backend, the mount time for .tar.bz2 files could be reduced by roughly factor 12 on my Ryzen 3900X with 12 physical and 24 logical cores. 
+Because of the parallelized `indexed_bzip2` backend, the mount time for .tar.bz2 files could be reduced by roughly factor 12 on my Ryzen 3900X with 12 physical and 24 logical cores.
 Because the parallelization is over blocks, the memory usage for the bz2 backend went up because at least as many bz2 blocks as there is parallelization (24 for these tests) must be hold in memory after prefetching.
 To improve the speed, this is in general even more than that.
 The memory usage is bounded by the maximum block cache size and maximum prefetch size but it might vary because of compression ratios of the blocks itself!
-In the benchmarks, it seems to top out at roughly 800 MiB.
+In the benchmarks, it seems to top out at roughly 200 MiB.
 This shows how important more RAM is to make good use of processors with a lot of cores!
 
 In my biased opinion, bzip2 compressed TAR files are now the best contender after uncompressed TAR files when using ratarmount.
@@ -46,7 +53,7 @@ It has to be explicitly enabled with `-P 0`.
 
 ![Speedup ratarmount -P 24 over -P 1 for bz2 backend](plots/parallel-bz2-ratarmount-comparison.png)
 
-When using all 24 logical cores for the parallel bz2 decoder in `indexed_bzip2`, the speedup tops out at roughly 12, which seems to coincide with my physical cores. 
+When using all 24 logical cores for the parallel bz2 decoder in `indexed_bzip2`, the speedup tops out at roughly 12, which seems to coincide with my physical cores.
 However, with only `-P 12`, the speedup will be much smaller than 12! The latter is not shown here but was observed manually.
 
 In general, the parallelization is quite trivial over the bz2 blocks but there might be reducing the parallel efficiency like I/O access becoming more random instead of sequential or caches being thrashed.
@@ -68,7 +75,7 @@ The killer comparison is the time it takes for `cat <file>` to finish.
 For some reason, this scales linearly with the TAR file size (approx. bytes per file x number of files) for archivemount while being of constant time in ratarmount.
 This makes it look like archivemount does not even support seeking at all.
 
-For compressed TAR files, this is especially noticeable. 
+For compressed TAR files, this is especially noticeable.
 `cat <file>` takes more than twice as long as mounting the whole .tar.bz2 file!
 For example, the TAR with 10k empty(!) files takes 2.9s to mount with archivemount but depending on the file which is accessed, the access with `cat` takes between 3ms and 5s.
 The time it takes seems to depend on the position of the file inside the TAR.
@@ -109,7 +116,7 @@ I hope to make ratarmount the clear winner by parallelizing the bz2 decoder in t
 ## Time to get metadata
 
 When simply listing all files with `find` inside the TAR (find also seems to call stat for each file!?), ratarmount is 10x slower than archivemount for all tested cases.
-I hope to improve upon this in the future. 
+I hope to improve upon this in the future.
 But currently, it looks like a design problem because of using Python and SQLite instead of a pure C program.
 
 
@@ -182,8 +189,8 @@ As can be seen, the `INTEGER` primary key version results in much smaller databa
 
 ![sqlite primary key benchmark times over row count](plots/sqlite%20primary%20key%20benchmark%20times%20over%20row%20count.png)
 
-I concluded that the varchar primary key version was the only real option for usable lookup times for the mounted FUSE system and all conditions except equality should be avoided because only that one seems to be able to capitalize on the sortedness and actually does a bisection search and scales with O(log n). 
-All other statements are ~10k times slower for the case with 2M rows. 
+I concluded that the varchar primary key version was the only real option for usable lookup times for the mounted FUSE system and all conditions except equality should be avoided because only that one seems to be able to capitalize on the sortedness and actually does a bisection search and scales with O(log n).
+All other statements are ~10k times slower for the case with 2M rows.
 This large gap even made benchmarking kinda awkward.
 
 ## Influence of SQL Cache Size on Insertion Times
@@ -196,7 +203,7 @@ This large gap even made benchmarking kinda awkward.
 
 ![sqlite cache size benchmark 1000k files](plots/sqlite%20cache%20size%20benchmark%201000k%20files.png)
 
-This benchmark with 1M files shows that table creation profits quite a lot from high cache sizes. 
+This benchmark with 1M files shows that table creation profits quite a lot from high cache sizes.
 The larger the data is, the more it will profit from higher cache sizes.
 Smaller cache sizes force a preemptive writing to disk, which makes subsequents sorts slower because it has to compare with values on disk.
 
