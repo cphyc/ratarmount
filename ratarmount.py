@@ -4,6 +4,7 @@
 import argparse
 import bisect
 import collections
+import datetime
 import io
 import json
 import os
@@ -15,6 +16,7 @@ import tarfile
 import tempfile
 import time
 import traceback
+import zipfile
 from abc import ABC, abstractmethod
 from timeit import default_timer as timer
 import typing
@@ -117,6 +119,11 @@ def stripSuffixFromCompressedFile(path: str) -> str:
         for suffix in compression.suffixes:
             if path.lower().endswith('.' + suffix.lower()):
                 return path[: -(len(suffix) + 1)]
+
+    for suffix in ['zip']:
+        if path.lower().endswith('.' + suffix.lower()):
+            return path[: -(len(suffix) + 1)]
+
     return path
 
 
@@ -406,6 +413,7 @@ class SQLiteIndexedTar(MountSource):
         stripRecursiveTarExtension : bool                = False,
         ignoreZeros                : bool                = False,
         verifyModificationTime     : bool                = False,
+        **kwargs
         # fmt: on
     ) -> None:
         """
@@ -435,6 +443,7 @@ class SQLiteIndexedTar(MountSource):
                                      tar will be mounted at <file>/ instead of <file>.tar/.
         verifyModificationTime : If true, then the index will be recreated automatically if the TAR archive has a more
                                  recent modification time than the index file.
+        kwargs : Unused. Only for compatibility with generic MountSource interface.
         """
 
         # stores which parent folders were last tried to add to database and therefore do exist
@@ -1815,13 +1824,9 @@ class FolderMountSource(MountSource):
 
         # TODO Accessing the old full path will be problematic when lazy mounting over one of its parent folders
         fullPath = os.path.realpath(os.path.join(self.root, filePath))
-        try:
-            TarFileType(encoding=self.options.get('encoding', tarfile.ENCODING))(fullPath)
-        except argparse.ArgumentTypeError:
-            return None
 
         try:
-            indexedTar = SQLiteIndexedTar(fullPath, writeIndex=True, **self.options)
+            mountSource = openMountSource(fullPath, **self.options)
         except Exception:
             return None
 
@@ -1829,7 +1834,7 @@ class FolderMountSource(MountSource):
         mountPoint = strippedFilePath if stripSuffix else filePath
 
         rootFileInfo = _makeMountPointFileInfoFromStats(os.stat(fullPath))
-        return FolderMountSource.RecursiveTarFileInfo(fullPath, mountPoint, rootFileInfo, indexedTar)
+        return FolderMountSource.RecursiveTarFileInfo(fullPath, mountPoint, rootFileInfo, mountSource)
 
     def setFolderDescriptor(self, fd: int) -> None:
         """
@@ -1990,6 +1995,108 @@ class FolderMountSource(MountSource):
             return file.read(size)
 
 
+class ZipMountSource(MountSource):
+    def __init__(self, path: str, **options) -> None:
+        # TODO pass through CLI password list and try to open encrypted zips
+        self.zipFile = zipfile.ZipFile(path, 'r')
+        self.files = self.zipFile.infolist()
+        self.options = options
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exception_type, exception_value, exception_traceback):
+        self.zipFile.close()
+
+    @staticmethod
+    def _convertToFileInfo(zipInfo: zipfile.ZipInfo, fileVersion: int) -> FileInfo:
+        mode = 0o555
+        if zipInfo.is_dir():
+            mode |= stat.S_IFDIR
+        else:
+            mode |= stat.S_IFREG
+
+        mtime = datetime.datetime(*zipInfo.date_time, tzinfo=datetime.timezone.utc).timestamp()
+
+        # According to section 4.5.7 in the .ZIP file format specification, links are supported:
+        # https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
+        # But the Python zipfile module does not even mention links anywhere,
+        # so we currently also can't or rather don't have to bother to support them.
+
+        # fmt: off
+        return FileInfo(
+            # fmt: off
+            offset       = fileVersion,  # Abuse this member to store the fileVersion as required for the read call
+            offsetheader = None,
+            size         = zipInfo.file_size,
+            mtime        = int(mtime),
+            mode         = mode,
+            type         = None,  # I think this is completely unused and mostly contained in mode
+            linkname     = None,  # I don't think zip supports links, which makes things easier
+            uid          = os.getuid(),
+            gid          = os.getgid(),
+            istar        = False,
+            issparse     = False
+            # fmt: on
+        )
+        # fmt: on
+
+    @overrides(MountSource)
+    def listDir(self, path: str) -> Optional[Iterable[str]]:
+        path = path.strip('/')
+        if path:
+            path += '/'
+
+        # TODO How to behave with files in zip with absolute paths? Currently, they would never be shown.
+        def getName(filePath):
+            if not filePath.startswith(path):
+                return None
+
+            filePath = filePath[len(path) :].strip('/')
+            if not filePath:
+                return None
+
+            # This effectively adds all parent paths as folders but theoretically parent folders should be in
+            # the zip separately but I'm not sure whether zip enforces that or not.
+            if '/' in filePath:
+                firstSlash = filePath.index('/')
+                filePath = filePath[:firstSlash]
+
+            return filePath
+
+        # ZipInfo.filename is wrongly named as it returns the full path inside the archive not just the name part
+        return set(getName(info.filename) for info in self.files if getName(info.filename))
+
+    def _getFileInfos(self, path: str) -> List[zipfile.ZipInfo]:
+        # TODO Generate dummy folder infos for parent folders which are not in the zip as a separate object?
+        return [info for info in self.files if info.filename.rstrip('/') == path.lstrip('/')]
+
+    def _getFileInfo(self, path: str, fileVersion: int = 0) -> Optional[zipfile.ZipInfo]:
+        infos = self._getFileInfos(path)
+        return infos[fileVersion] if fileVersion < len(infos) and fileVersion >= -len(infos) else None
+
+    @overrides(MountSource)
+    def getFileInfo(self, path: str, fileVersion: int = 0) -> Optional[FileInfo]:
+        info = self._getFileInfo(path, fileVersion)
+        return ZipMountSource._convertToFileInfo(info, fileVersion) if info else None
+
+    @overrides(MountSource)
+    def fileVersions(self, path: str) -> int:
+        return len(self._getFileInfos(path))
+
+    @overrides(MountSource)
+    def read(self, path: str, size: int, offset: int, fileInfo: Optional[FileInfo] = None) -> bytes:
+        fileVersion = fileInfo.offset if fileInfo else 0
+        zipInfo = self._getFileInfo(path, fileVersion)
+        if zipInfo is None:
+            raise Exception("Requested file not found.")
+
+        # TODO Avoid frequent open calls by caching some open file objects. See FolderMountSource.read
+        with self.zipFile.open(zipInfo, 'r') as file:
+            file.seek(offset)
+            return file.read(size)
+
+
 class DummyFuseOperations:
     """A dummy class that is used to replace
     fuse.Operations if fusepy is not installed."""
@@ -2013,6 +2120,22 @@ class DummyFuseOperations:
 FuseOperations = fuse.Operations if 'fuse' in sys.modules else DummyFuseOperations
 
 
+def openMountSource(path: str, **options) -> MountSource:
+    if not os.path.exists(path):
+        raise Exception("Mount source does not exist!")
+
+    if os.path.isdir(path):
+        return FolderMountSource(path, **options)
+
+    if zipfile.is_zipfile(path):
+        return ZipMountSource(path, **options)
+
+    # TarFileType(encoding=self.options.get('encoding', tarfile.ENCODING))(path)
+
+    return SQLiteIndexedTar(path, **options)
+
+
+# TODO split off TarMount's union mounting capabilities into a generic UnionMountSource class!
 class TarMount(FuseOperations):  # type: ignore
     """
     This class implements the fusepy interface in order to create a mounted file system view
@@ -2044,12 +2167,12 @@ class TarMount(FuseOperations):  # type: ignore
             except Exception:
                 pass
 
+        sqliteIndexedTarOptions['writeIndex'] = True
+        sqliteIndexedTarOptions['lazyMounting'] = lazyMounting
+
         # This also will create or load the block offsets for compressed formats
         self.mountSources: List[MountSource] = [
-            SQLiteIndexedTar(tarFile, writeIndex=True, **sqliteIndexedTarOptions)
-            if not os.path.isdir(tarFile)
-            else FolderMountSource(tarFile, lazyMounting=lazyMounting, **sqliteIndexedTarOptions)
-            for tarFile in pathToMount
+            openMountSource(path, **sqliteIndexedTarOptions) for path in pathToMount
         ]
 
         # No threads should be created and still be open before FUSE forks.
@@ -2649,10 +2772,12 @@ seeking capabilities when opening that file.
         sys.exit(1)
 
     # Manually check that all specified TARs and folders exist
-    args.mount_source = [
-        TarFileType(encoding=args.encoding)(tarFile)[0] if not os.path.isdir(tarFile) else os.path.realpath(tarFile)
-        for tarFile in args.mount_source
-    ]
+    def checkMountSource(path):
+        if os.path.isdir(path) or zipfile.is_zipfile(path):
+            return os.path.realpath(path)
+        return TarFileType(encoding=args.encoding)(path)[0]
+
+    args.mount_source = [checkMountSource(path) for path in args.mount_source]
 
     # Automatically generate a default mount path
     if not args.mount_point:
