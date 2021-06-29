@@ -1789,7 +1789,7 @@ class FolderMountSource(MountSource):
     __slots__ = ('root', 'mountedTars', 'lazyMounting', 'options')
 
     @dataclass
-    class RecursiveTarFileInfo:
+    class MountInfo:
         fullPath: str  # full access path in the original file system
         # mount point of this recursively mounted TAR is relative root and might have the suffix stripped
         mountPoint: str
@@ -1801,7 +1801,7 @@ class FolderMountSource(MountSource):
         self.lazyMounting: bool = lazyMounting
         self.options = options
         # stores mounted TARs per mount point relative (without leading '/') to self.root.
-        self.mountedTars: Dict[str, FolderMountSource.RecursiveTarFileInfo] = {}
+        self.mountedTars: Dict[str, FolderMountSource.MountInfo] = {}
 
         # Find TAR files in this folder and mount them recursively if so requested
         if options.get('recursive', False) and os.path.isdir(self.root) and not self.lazyMounting:
@@ -1814,7 +1814,7 @@ class FolderMountSource(MountSource):
                     if info:
                         self.mountedTars[info.mountPoint] = info
 
-    def _tryToMountFile(self, filePath: str) -> Optional[RecursiveTarFileInfo]:
+    def _tryToMountFile(self, filePath: str) -> Optional[MountInfo]:
         """filePath : relative to self.root"""
 
         # For better performance, only looking at the suffix not at the magic bytes.
@@ -1834,7 +1834,7 @@ class FolderMountSource(MountSource):
         mountPoint = strippedFilePath if stripSuffix else filePath
 
         rootFileInfo = _makeMountPointFileInfoFromStats(os.stat(fullPath))
-        return FolderMountSource.RecursiveTarFileInfo(fullPath, mountPoint, rootFileInfo, mountSource)
+        return FolderMountSource.MountInfo(fullPath, mountPoint, rootFileInfo, mountSource)
 
     def setFolderDescriptor(self, fd: int) -> None:
         """
@@ -1845,7 +1845,7 @@ class FolderMountSource(MountSource):
         os.fchdir(fd)
         self.root = '.'
 
-    def _findMountedTar(self, path: str) -> Optional[Tuple[str, RecursiveTarFileInfo]]:
+    def _findMountedTar(self, path: str) -> Optional[Tuple[str, MountInfo]]:
         """
         Returns the mount point, which can be found in self.mountedTars, and the rest of the path.
         Basically, it splits path at the appropriate mount point boundary.
@@ -1866,11 +1866,11 @@ class FolderMountSource(MountSource):
 
             # Try to dynamically mount TAR files
             if self.lazyMounting:
-                recursiveTarFileInfo = self._tryToMountFile(subPath)
-                if recursiveTarFileInfo:
+                mountInfo = self._tryToMountFile(subPath)
+                if mountInfo:
                     pathInsideTar = os.path.join(*parts[i + 1 :]) if i + 1 < len(parts) else "/"
-                    self.mountedTars[recursiveTarFileInfo.mountPoint] = recursiveTarFileInfo
-                    return pathInsideTar, recursiveTarFileInfo
+                    self.mountedTars[mountInfo.mountPoint] = mountInfo
+                    return pathInsideTar, mountInfo
 
         return None
 
@@ -1909,9 +1909,9 @@ class FolderMountSource(MountSource):
 
         pathSplitAtMountPoint = self._findMountedTar(path)
         if pathSplitAtMountPoint:
-            pathInMountPoint, recursiveTarFileInfo = pathSplitAtMountPoint
+            pathInMountPoint, mountInfo = pathSplitAtMountPoint
             if pathInMountPoint and pathInMountPoint != '/':
-                fileInfo = recursiveTarFileInfo.mountSource.getFileInfo(pathInMountPoint, fileVersion=fileVersion)
+                fileInfo = mountInfo.mountSource.getFileInfo(pathInMountPoint, fileVersion=fileVersion)
 
                 if isinstance(fileInfo, FileInfo):
                     # Dereference hard links
@@ -1921,14 +1921,14 @@ class FolderMountSource(MountSource):
                         # For self-referencing hard links return older versions of that file
                         if targetLink == pathInMountPoint:
                             return self.getFileInfo(
-                                os.path.join(recursiveTarFileInfo.mountPoint, targetLink),
+                                os.path.join(mountInfo.mountPoint, targetLink),
                                 fileVersion + 1 if fileVersion >= 0 else fileVersion - 1,
                             )
 
-                        return self.getFileInfo(os.path.join(recursiveTarFileInfo.mountPoint, targetLink), fileVersion)
+                        return self.getFileInfo(os.path.join(mountInfo.mountPoint, targetLink), fileVersion)
                     return fileInfo
                 return None
-            return recursiveTarFileInfo.rootFileInfo
+            return mountInfo.rootFileInfo
 
         # This is a bit of problematic design, however, the fileVersions count from 1 for the user.
         # And as -1 means the last version, 0 should also mean the first version ...
@@ -1946,8 +1946,8 @@ class FolderMountSource(MountSource):
         """
         pathSplitAtMountPoint = self._findMountedTar(path)
         if pathSplitAtMountPoint:
-            pathInMountPoint, recursiveTarFileInfo = pathSplitAtMountPoint
-            return recursiveTarFileInfo.mountSource.listDir(pathInMountPoint)
+            pathInMountPoint, mountInfo = pathSplitAtMountPoint
+            return mountInfo.mountSource.listDir(pathInMountPoint)
 
         realpath = self._realpath(path)
         if not os.path.isdir(realpath):
@@ -1969,8 +1969,8 @@ class FolderMountSource(MountSource):
         """Returns available versions for a file."""
         pathSplitAtMountPoint = self._findMountedTar(path)
         if pathSplitAtMountPoint:
-            pathInMountPoint, recursiveTarFileInfo = pathSplitAtMountPoint
-            return recursiveTarFileInfo.mountSource.fileVersions(pathInMountPoint)
+            pathInMountPoint, mountInfo = pathSplitAtMountPoint
+            return mountInfo.mountSource.fileVersions(pathInMountPoint)
         return 1 if self._exists(path) else 0
 
     @overrides(MountSource)
@@ -1980,8 +1980,8 @@ class FolderMountSource(MountSource):
         """
         pathSplitAtMountPoint = self._findMountedTar(path)
         if pathSplitAtMountPoint:
-            pathInMountPoint, recursiveTarFileInfo = pathSplitAtMountPoint
-            return recursiveTarFileInfo.mountSource.read(pathInMountPoint, size, offset, fileInfo)
+            pathInMountPoint, mountInfo = pathSplitAtMountPoint
+            return mountInfo.mountSource.read(pathInMountPoint, size, offset, fileInfo)
 
         realpath = self._realpath(path)
         if not self._exists(path):
