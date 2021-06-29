@@ -5,6 +5,7 @@ import io
 import os
 import sys
 import gzip
+import stat
 import tarfile
 import tempfile
 
@@ -144,65 +145,77 @@ with tempfile.NamedTemporaryFile(suffix=".tar.gz") as tmpTarFile, tempfile.Named
         )
 
         finfo = indexedFile.getFileInfo("/src/test.sh")
-        assert finfo.type == tarfile.REGTYPE
+        assert stat.S_ISREG(finfo.mode)
         assert indexedFile.read(path="/src/test.sh", size=finfo.size, offset=0) == b"echo hi"
 
         finfo = indexedFile.getFileInfo("/dist/a")
-        assert finfo.type == tarfile.DIRTYPE
+        assert stat.S_ISDIR(finfo.mode)
         assert indexedFile._getFileInfo("/dist/a", listDir=True) == {
             'b': ratarmount.FileInfo(
-                offsetheader=3584,
-                offset=4096,
                 size=0,
                 mtime=0,
                 mode=16804,
-                type=b'5',
                 linkname='',
                 uid=0,
                 gid=0,
-                istar=0,
-                issparse=0,
+                userdata=[
+                    ratarmount.SQLiteIndexedTarUserData(
+                        offsetheader=3584,
+                        offset=4096,
+                        istar=0,
+                        issparse=0,
+                    )
+                ],
             )
         }
         assert indexedFile._getFileInfo("/", listDir=True) == {
             'README.md': FileInfo(
-                offsetheader=0,
-                offset=512,
                 size=11,
                 mtime=0,
                 mode=33188,
-                type=b'0',
                 linkname='',
                 uid=0,
                 gid=0,
-                istar=0,
-                issparse=0,
+                userdata=[
+                    ratarmount.SQLiteIndexedTarUserData(
+                        offsetheader=0,
+                        offset=512,
+                        istar=0,
+                        issparse=0,
+                    )
+                ],
             ),
             'dist': FileInfo(
-                offsetheader=2560,
-                offset=3072,
                 size=0,
                 mtime=0,
                 mode=16804,
-                type=b'5',
                 linkname='',
                 uid=0,
                 gid=0,
-                istar=0,
-                issparse=0,
+                userdata=[
+                    ratarmount.SQLiteIndexedTarUserData(
+                        offsetheader=2560,
+                        offset=3072,
+                        istar=0,
+                        issparse=0,
+                    )
+                ],
             ),
             'src': FileInfo(
-                offsetheader=1024,
-                offset=1536,
                 size=0,
                 mtime=0,
                 mode=16804,
-                type=b'5',
                 linkname='',
                 uid=0,
                 gid=0,
-                istar=0,
-                issparse=0,
+                userdata=[
+                    ratarmount.SQLiteIndexedTarUserData(
+                        offsetheader=1024,
+                        offset=1536,
+                        istar=0,
+                        issparse=0,
+                    )
+                ],
             ),
         }
 
