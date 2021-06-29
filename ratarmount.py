@@ -21,7 +21,7 @@ from abc import ABC, abstractmethod
 from timeit import default_timer as timer
 import typing
 from typing import Any, AnyStr, BinaryIO, Dict, IO, Iterable, List, Optional, Set, Tuple, Union
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # Can't do this dynamically with importlib.import_module and using supportedCompressions
 # because then the static checkers like mypy and pylint won't recognize the modules!
@@ -353,7 +353,7 @@ class FileInfo:
     # FileInfo to a possibly recursively "mounted" MountSource, remove that last element belonging to it.
     # This way an arbitrary amount of userdata can be stored and it should be decidable which belongs to whom in
     # a chain of MountSource objects.
-    userdata : List[Any] = field(default_factory=list)
+    userdata : List[Any]
     # fmt: on
 
 
@@ -389,7 +389,7 @@ class MountSource(ABC):
         pass
 
     @abstractmethod
-    def read(self, path: str, size: int, offset: int, fileInfo: Optional[FileInfo] = None) -> bytes:
+    def read(self, fileInfo: FileInfo, size: int, offset: int) -> bytes:
         pass
 
     def exists(self, path: str):
@@ -1229,23 +1229,7 @@ class SQLiteIndexedTar(MountSource):
         return len(fileVersions) if isinstance(fileVersions, dict) else 0
 
     @overrides(MountSource)
-    def read(self, path: str, size: int, offset: int, fileInfo: Optional[FileInfo] = None) -> bytes:
-        """
-        fileInfo: This argument can be specified for performance reasons. It must be the FileInfo object for path!
-        """
-        if fileInfo is None:
-            queriedFileInfo = self.getFileInfo(path)
-            if isinstance(queriedFileInfo, FileInfo):
-                fileInfo = queriedFileInfo
-        if not isinstance(fileInfo, FileInfo):
-            raise ValueError("Specified path '{}' is not a file that can be read!".format(path))
-
-        # Dereference hard links
-        if not stat.S_ISREG(fileInfo.mode) and not stat.S_ISLNK(fileInfo.mode) and fileInfo.linkname:
-            targetLink = '/' + fileInfo.linkname.lstrip('/')
-            if targetLink != path:
-                return self.read(targetLink, size, offset)
-
+    def read(self, fileInfo: FileInfo, size: int, offset: int) -> bytes:
         assert fileInfo.userdata
         tarFileInfo = fileInfo.userdata[-1]
         assert isinstance(tarFileInfo, SQLiteIndexedTarUserData)
@@ -1787,6 +1771,7 @@ def _makeMountPointFileInfoFromStats(stats: os.stat_result) -> FileInfo:
         linkname = "",
         uid      = stats.st_uid,
         gid      = stats.st_gid,
+        userdata = [],
         # fmt: on
     )
 
@@ -1846,7 +1831,9 @@ class FolderMountSource(MountSource):
         mountPoint = strippedFilePath if stripSuffix else filePath
 
         rootFileInfo = _makeMountPointFileInfoFromStats(os.stat(fullPath))
-        return FolderMountSource.MountInfo(fullPath, mountPoint, rootFileInfo, mountSource)
+        mountInfo = FolderMountSource.MountInfo(fullPath, mountPoint, rootFileInfo, mountSource)
+        mountInfo.rootFileInfo.userdata.append(mountInfo)
+        return mountInfo
 
     def setFolderDescriptor(self, fd: int) -> None:
         """
@@ -1906,6 +1893,7 @@ class FolderMountSource(MountSource):
             linkname = os.readlink( filePath ) if os.path.islink( filePath ) else "",
             uid      = stats.st_uid,
             gid      = stats.st_gid,
+            userdata = [],
             # fmt: on
         )
 
@@ -1913,7 +1901,10 @@ class FolderMountSource(MountSource):
 
     @overrides(MountSource)
     def getFileInfo(self, path: str, fileVersion: int = 0) -> Optional[FileInfo]:
-        """Return file info for given path."""
+        """
+        Return file info for given path. Note that all returned file infos contain MountInfo
+        or a file path string at the back of FileInfo.userdata.
+        """
         # TODO: Add support for the .versions API in order to access the underlying TARs if stripRecursiveTarExtension
         #       is false? Then again, SQLiteIndexedTar is not able to do this either, so it might be inconsistent.
 
@@ -1924,7 +1915,10 @@ class FolderMountSource(MountSource):
             # Basically, I did accidentally mix user-visible versions 1+ versinos with API 0+ versions,
             # leading to this problematic clash of 0 and 1.
             if fileVersion in [0, 1] and self._exists(path):
-                return self._getFileInfoFromRealFile(self._realpath(path))
+                recursiveFileInfo = self._getFileInfoFromRealFile(self._realpath(path))
+                recursiveFileInfo.userdata.append(path)
+                return recursiveFileInfo
+
             return None
 
         pathInMountPoint, mountInfo = pathSplitAtMountPoint
@@ -1935,6 +1929,8 @@ class FolderMountSource(MountSource):
 
         if not isinstance(fileInfo, FileInfo):
             return None
+
+        fileInfo.userdata.append(mountInfo)
 
         if stat.S_ISREG(fileInfo.mode) or stat.S_ISLNK(fileInfo.mode) or not fileInfo.linkname:
             return fileInfo
@@ -1987,14 +1983,18 @@ class FolderMountSource(MountSource):
         return 1 if self._exists(path) else 0
 
     @overrides(MountSource)
-    def read(self, path: str, size: int, offset: int, fileInfo: Optional[FileInfo] = None) -> bytes:
-        """
-        fileInfo: This argument can be specified for performance reasons. It must be the FileInfo object for path!
-        """
-        pathSplitAtMountPoint = self._findMountedTar(path)
-        if pathSplitAtMountPoint:
-            pathInMountPoint, mountInfo = pathSplitAtMountPoint
-            return mountInfo.mountSource.read(pathInMountPoint, size, offset, fileInfo)
+    def read(self, fileInfo: FileInfo, size: int, offset: int) -> bytes:
+        mountInfo = fileInfo.userdata[-1]
+
+        if isinstance(mountInfo, FolderMountSource.MountInfo):
+            oldUserData = fileInfo.userdata.pop()
+            try:
+                return mountInfo.mountSource.read(fileInfo, size, offset)
+            finally:
+                fileInfo.userdata.append(oldUserData)
+
+        assert isinstance(mountInfo, str)
+        path = mountInfo
 
         realpath = self._realpath(path)
         if not self._exists(path):
@@ -2044,6 +2044,7 @@ class ZipMountSource(MountSource):
             linkname = "",
             uid      = os.getuid(),
             gid      = os.getgid(),
+            userdata = [zipInfo],
             # fmt: on
         )
 
@@ -2093,11 +2094,9 @@ class ZipMountSource(MountSource):
         return len(self._getFileInfos(path))
 
     @overrides(MountSource)
-    def read(self, path: str, size: int, offset: int, fileInfo: Optional[FileInfo] = None) -> bytes:
-        fileVersion = fileInfo.userdata[-1] if fileInfo and fileInfo.userdata else 0
-        zipInfo = self._getFileInfo(path, fileVersion)
-        if zipInfo is None:
-            raise Exception("Requested file not found.")
+    def read(self, fileInfo: FileInfo, size: int, offset: int) -> bytes:
+        zipInfo = fileInfo.userdata[-1]
+        assert isinstance(zipInfo, zipfile.ZipInfo)
 
         # TODO Avoid frequent open calls by caching some open file objects. See FolderMountSource.read
         with self.zipFile.open(zipInfo, 'r') as file:
@@ -2334,6 +2333,9 @@ class TarMount(FuseOperations):  # type: ignore
                 linkname = "",
                 uid      = parentFileInfo.uid,
                 gid      = parentFileInfo.gid,
+                # I think this does not matter because currently userdata is only used in read calls,
+                # which should only be given non-directory files and this is a directory
+                userdata = [],
                 # fmt: on
             )
 
@@ -2466,7 +2468,7 @@ class TarMount(FuseOperations):  # type: ignore
             raise fuse.FuseOSError(fuse.errno.EIO)
 
         try:
-            return mountSource.read(filePath, size, offset, fileInfo)
+            return mountSource.read(fileInfo, size, offset)
         except Exception as exception:
             traceback.print_exc()
             print("Caught exception when trying to read data from underlying TAR file! Returning errno.EIO.")
