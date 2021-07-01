@@ -2164,6 +2164,12 @@ class DummyFuseOperations:
     def readlink(self):
         pass
 
+    def open(self):
+        pass
+
+    def release(self):
+        pass
+
 
 FuseOperations = fuse.Operations if 'fuse' in sys.modules else DummyFuseOperations
 
@@ -2477,7 +2483,7 @@ class FileVersionLayer(MountSource):
             fileInfo.userdata.append(pathAndVersion)
 
 
-class TarMount(FuseOperations):  # type: ignore
+class FuseMount(FuseOperations):  # type: ignore
     """
     This class implements the fusepy interface in order to create a mounted file system view to a MountSource.
     Tasks of this class itself:
@@ -2486,6 +2492,16 @@ class TarMount(FuseOperations):  # type: ignore
        - Enabling FolderMountSource to bind to the nonempty folder under the mountpoint itself.
     Other functionalities like file versioning, hard link resolving, and union mounting are implemented by using
     the respective MountSource derived classes.
+
+    Documentation for FUSE methods can be found in the fusepy or libfuse headers. There seems to be no complete
+    rendered documentation aside from the header comments.
+
+    https://github.com/fusepy/fusepy/blob/master/fuse.py
+    https://github.com/libfuse/libfuse/blob/master/include/fuse.h
+    https://man7.org/linux/man-pages/man3/errno.3.html
+
+    All path arguments for overriden fusepy methods do have a leading slash ('/')!
+    This is why MountSource also should expect leading slashes in all paths.
     """
 
     __slots__ = (
@@ -2495,6 +2511,8 @@ class TarMount(FuseOperations):  # type: ignore
         'mountPointFd',
         'mountPointWasCreated',
         'selfBindMount',
+        'openFiles',
+        'lastFileHandle',
     )
 
     def __init__(
@@ -2529,6 +2547,9 @@ class TarMount(FuseOperations):  # type: ignore
         self.mountSource: MountSource = FileVersionLayer(UnionMountSource(mountSources))
 
         self.rootFileInfo = _makeMountPointFileInfoFromStats(os.stat(pathToMount[0]))
+
+        self.openFiles : Dict[int, IO[bytes]] = {}
+        self.lastFileHandle : int = 0  # It will be incremented before being returned. It can't hurt to never return 0.
 
         # Create mount point if it does not exist
         self.mountPointWasCreated = False
@@ -2604,7 +2625,42 @@ class TarMount(FuseOperations):  # type: ignore
         return fileInfo.linkname
 
     @overrides(FuseOperations)
+    def open(self, path, flags):
+        """Returns file handle of opened path."""
+
+        fileInfo = self.mountSource.getFileInfo(path)
+        if not fileInfo:
+            raise fuse.FuseOSError(fuse.errno.EIO)
+
+        try:
+            self.lastFileHandle += 1
+            self.openFiles[self.lastFileHandle] = self.mountSource.open(fileInfo)
+            return self.lastFileHandle
+        except Exception as exception:
+            traceback.print_exc()
+            print("Caught exception when trying to open file.", fileInfo)
+            raise fuse.FuseOSError(fuse.errno.EIO) from exception
+
+
+    @overrides(FuseOperations)
+    def release(self, path, fh):
+        if fh not in self.openFiles:
+            raise fuse.FuseOSError(fuse.errno.ESTALE)
+
+        self.openFiles[fh].close()
+        del self.openFiles[fh]
+        return fh
+
+    @overrides(FuseOperations)
     def read(self, path: str, size: int, offset: int, fh: int) -> bytes:
+        if fh in self.openFiles:
+            self.openFiles[fh].seek(offset, os.SEEK_SET)
+            return self.openFiles[fh].read(size)
+
+        # As far as I understand FUSE and my own file handle cache, this should never happen. But you never know.
+        if printDebug >= 1:
+            print("[Warning] Given file handle does not exist. Will open file before reading which might be slow.")
+
         fileInfo = self.mountSource.getFileInfo(path)
         if not fileInfo:
             raise fuse.FuseOSError(fuse.errno.EIO)
@@ -2986,7 +3042,7 @@ def cli(rawArgs: Optional[List[str]] = None) -> None:
     global printDebug
     printDebug = args.debug
 
-    fuseOperationsObject = TarMount(
+    fuseOperationsObject = FuseMount(
         # fmt: off
         pathToMount                = args.mount_source,
         clearIndexCache            = args.recreate_index,
