@@ -1,4 +1,7 @@
 
+# Version 0.8.1 built on 2021-07-03
+ - Fix "BLOB longer than INT_MAX bytes" error for .gz archives larger than ~400GB.
+
 # Version 0.8.0 built on 2021-06-27
 
  - Fix SQLiteIndexedTar class when being called with a file object.
