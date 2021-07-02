@@ -484,6 +484,13 @@ class SQLiteIndexedTar:
                 self.indexFileName = indexPath
                 break
         if self.indexIsLoaded():
+            try:
+                indexVersion = db.execute("SELECT major,minor FROM versions WHERE name == 'index';").fetchone()
+                if indexVersion and indexVersion > __version__:
+                    print("[Warning] The loaded index was creaed with a newer version of ratarmount.")
+                    print("[Warning] If there are any problems, please update ratarmount or recreate the index")
+                    print("[Warning] with this ratarmount version using the --recreate-index option!")
+
             self._loadOrStoreCompressionOffsets()
             return
 
