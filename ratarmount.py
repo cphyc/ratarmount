@@ -46,6 +46,10 @@ try:
     import lzmaffi
 except ImportError:
     pass
+try:
+    import rarfile
+except ImportError:
+    pass
 
 
 __version__ = '0.8.1'
@@ -121,7 +125,7 @@ def stripSuffixFromCompressedFile(path: str) -> str:
             if path.lower().endswith('.' + suffix.lower()):
                 return path[: -(len(suffix) + 1)]
 
-    for suffix in ['zip']:
+    for suffix in ['zip', 'rar']:
         if path.lower().endswith('.' + suffix.lower()):
             return path[: -(len(suffix) + 1)]
 
@@ -2120,25 +2124,20 @@ class AutoMountLayer(MountSource):
 class ZipMountSource(MountSource):
     def __init__(self, fileOrPath: Union[str, IO[bytes]], **options) -> None:
         # TODO pass through CLI password list and try to open encrypted zips
-        self.zipFile = zipfile.ZipFile(fileOrPath, 'r')
-        self.files = self.zipFile.infolist()
+        self.fileObject = zipfile.ZipFile(fileOrPath, 'r')
+        self.files = self.fileObject.infolist()
         self.options = options
 
     def __enter__(self):
         return self
 
     def __exit__(self, exception_type, exception_value, exception_traceback):
-        self.zipFile.close()
+        self.fileObject.close()
 
     @staticmethod
-    def _convertToFileInfo(zipInfo: zipfile.ZipInfo, fileVersion: int) -> FileInfo:
-        mode = 0o555
-        if zipInfo.is_dir():
-            mode |= stat.S_IFDIR
-        else:
-            mode |= stat.S_IFREG
-
-        mtime = datetime.datetime(*zipInfo.date_time, tzinfo=datetime.timezone.utc).timestamp()
+    def _convertToFileInfo(info: zipfile.ZipInfo, fileVersion: int) -> FileInfo:
+        mode = 0o555 | (stat.S_IFDIR if info.is_dir() else stat.S_IFREG)
+        mtime = datetime.datetime(*info.date_time, tzinfo=datetime.timezone.utc).timestamp() if info.date_time else 0
 
         # According to section 4.5.7 in the .ZIP file format specification, links are supported:
         # https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
@@ -2147,13 +2146,13 @@ class ZipMountSource(MountSource):
 
         fileInfo = FileInfo(
             # fmt: off
-            size     = zipInfo.file_size,
+            size     = info.file_size,
             mtime    = mtime,
             mode     = mode,
             linkname = "",
             uid      = os.getuid(),
             gid      = os.getgid(),
-            userdata = [zipInfo],
+            userdata = [info],
             # fmt: on
         )
 
@@ -2204,11 +2203,98 @@ class ZipMountSource(MountSource):
 
     @overrides(MountSource)
     def open(self, fileInfo: FileInfo) -> IO[bytes]:
-        zipInfo = fileInfo.userdata[-1]
-        assert isinstance(zipInfo, zipfile.ZipInfo)
+        info = fileInfo.userdata[-1]
+        assert isinstance(info, zipfile.ZipInfo)
+        return self.fileObject.open(info, 'r')
 
-        # TODO Avoid frequent open calls by caching some open file objects. See FolderMountSource.read
-        return self.zipFile.open(zipInfo, 'r')
+    @overrides(MountSource)
+    def read(self, fileInfo: FileInfo, size: int, offset: int) -> bytes:
+        with self.open(fileInfo) as file:
+            file.seek(offset, os.SEEK_SET)
+            return file.read(size)
+
+
+class RarMountSource(MountSource):
+    # Basically copy paste of ZipMountSource because the interfaces are very similar
+
+    def __init__(self, fileOrPath: Union[str, IO[bytes]], **options) -> None:
+        # TODO pass through CLI password list and try to open encrypted rars
+        self.fileObject = rarfile.RarFile(fileOrPath, 'r')
+        self.files = self.fileObject.infolist()
+        self.options = options
+
+    @staticmethod
+    def _convertToFileInfo(info: zipfile.ZipInfo, fileVersion: int) -> FileInfo:
+        mode = 0o555 | (stat.S_IFDIR if info.is_dir() else stat.S_IFREG)
+        mtime = datetime.datetime(*info.date_time, tzinfo=datetime.timezone.utc).timestamp() if info.date_time else 0
+
+        # According to section 4.5.7 in the .ZIP file format specification, links are supported:
+        # https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
+        # But the Python zipfile module does not even mention links anywhere,
+        # so we currently also can't or rather don't have to bother to support them.
+
+        fileInfo = FileInfo(
+            # fmt: off
+            size     = info.file_size,
+            mtime    = mtime,
+            mode     = mode,
+            linkname = "",
+            uid      = os.getuid(),
+            gid      = os.getgid(),
+            userdata = [info],
+            # fmt: on
+        )
+
+        return fileInfo
+
+    @overrides(MountSource)
+    def listDir(self, path: str) -> Optional[Iterable[str]]:
+        path = path.strip('/')
+        if path:
+            path += '/'
+
+        # TODO How to behave with files in zip with absolute paths? Currently, they would never be shown.
+        def getName(filePath):
+            if not filePath.startswith(path):
+                return None
+
+            filePath = filePath[len(path) :].strip('/')
+            if not filePath:
+                return None
+
+            # This effectively adds all parent paths as folders but theoretically parent folders should be in
+            # the zip separately but I'm not sure whether zip enforces that or not.
+            if '/' in filePath:
+                firstSlash = filePath.index('/')
+                filePath = filePath[:firstSlash]
+
+            return filePath
+
+        # ZipInfo.filename is wrongly named as it returns the full path inside the archive not just the name part
+        return set(getName(info.filename) for info in self.files if getName(info.filename))
+
+    def _getFileInfos(self, path: str) -> List['rarfile.RarInfo']:
+        # TODO Generate dummy folder infos for parent folders which are not in the zip as a separate object?
+        return [info for info in self.files if info.filename.rstrip('/') == path.lstrip('/')]
+
+    def _getFileInfo(self, path: str, fileVersion: int = 0) -> Optional['rarfile.RarInfo']:
+        infos = self._getFileInfos(path)
+        return infos[fileVersion] if fileVersion < len(infos) and fileVersion >= -len(infos) else None
+
+    @overrides(MountSource)
+    def getFileInfo(self, path: str, fileVersion: int = 0) -> Optional[FileInfo]:
+        info = self._getFileInfo(path, fileVersion)
+        return RarMountSource._convertToFileInfo(info, fileVersion) if info else None
+
+    @overrides(MountSource)
+    def fileVersions(self, path: str) -> int:
+        return len(self._getFileInfos(path))
+
+    @overrides(MountSource)
+    def open(self, fileInfo: FileInfo) -> IO[bytes]:
+        info = fileInfo.userdata[-1]
+        assert isinstance(info, rarfile.RarInfo)
+        return self.fileObject.open(info, 'r')
 
     @overrides(MountSource)
     def read(self, fileInfo: FileInfo, size: int, offset: int) -> bytes:
@@ -2254,8 +2340,25 @@ def openMountSource(fileOrPath: Union[str, IO[bytes]], **options) -> MountSource
         if os.path.isdir(fileOrPath):
             return FolderMountSource('.' if fileOrPath == '.' else os.path.realpath(fileOrPath))
 
-    if zipfile.is_zipfile(fileOrPath):
-        return ZipMountSource(fileOrPath, **options)
+    try:
+        if zipfile.is_zipfile(fileOrPath):
+            return ZipMountSource(fileOrPath, **options)
+    except Exception as e:
+        if printDebug >= 1:
+            print("[Info] Checking for zip file raised an exception:", e)
+    finally:
+        if hasattr(fileOrPath, 'seek'):
+            fileOrPath.seek(0)  # type: ignore
+
+    try:
+        if 'rarfile' in sys.modules and rarfile.is_rarfile(fileOrPath):
+            return RarMountSource(fileOrPath, **options)
+    except Exception as e:
+        if printDebug >= 1:
+            print("[Info] Checking for rar file raised an exception:", e)
+    finally:
+        if hasattr(fileOrPath, 'seek'):
+            fileOrPath.seek(0)  # type: ignore
 
     # TarFileType(encoding=self.options.get('encoding', tarfile.ENCODING))(path)
 
