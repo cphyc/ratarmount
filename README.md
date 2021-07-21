@@ -27,17 +27,25 @@ In [contrast](https://github.com/libarchive/libarchive#notes-about-the-library-d
 
 # Table of Contents
 
-1. [Installation](#installation)
-2. [Benchmarks](#benchmarks)
-3. [The Problem](#the-problem)
-4. [The Solution](#the-solution)
-5. [Usage](#usage)
-    1. [Metadata Index Cache](#metadata-index-cache)
-    2. [Bind Mounting](#bind-mounting)
-    3. [Union Mounting](#union-mounting)
-    4. [File versions](#file-versions)
-    5. [Compressed non-TAR files](#compressed-non-tar-files)
-    6. [Xz and Zst Files](#xz-and-zst-files)
+- [Random Access Read-Only Tar Mount (Ratarmount)](#random-access-read-only-tar-mount-ratarmount)
+- [Table of Contents](#table-of-contents)
+- [Installation](#installation)
+  - [Benchmarks](#benchmarks)
+- [The Problem](#the-problem)
+  - [Partial Solutions](#partial-solutions)
+    - [Archivemount](#archivemount)
+    - [Tarindexer](#tarindexer)
+    - [TAR Browser](#tar-browser)
+  - [The Solution](#the-solution)
+- [Usage](#usage)
+  - [Metadata Index Cache](#metadata-index-cache)
+  - [Bind Mounting](#bind-mounting)
+  - [Union Mounting](#union-mounting)
+  - [File versions](#file-versions)
+  - [Prefix Removal](#prefix-removal)
+  - [Compressed non-TAR files](#compressed-non-tar-files)
+  - [Xz and Zst Files](#xz-and-zst-files)
+  - [Donations](#donations)
 
 
 # Installation
