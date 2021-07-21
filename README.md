@@ -59,6 +59,12 @@ Or, if you want to test the latest version:
 pip install git+https://github.com/mxmlnkn/ratarmount.git@develop#egginfo=ratarmount
 ```
 
+By default, `ratarmount` does not require libraries to handle gzip/bzip/zstd compression to be installed.
+You can however install them using
+```bash
+pip install 'ratarmount[full]'
+```
+
 You can also simply download [ratarmount.py](https://github.com/mxmlnkn/ratarmount/raw/master/ratarmount.py) and call it directly after installing the dependencies manually with: `pip3 install --requirement https://raw.githubusercontent.com/mxmlnkn/ratarmount/master/requirements.txt`.
 
 In order to use, the xz backend, you currently have to do more manual setup because [lzmaffi](https://github.com/r3m0t/backports.lzma) does not provide wheels.
